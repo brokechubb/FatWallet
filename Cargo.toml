@@ -1,0 +1,70 @@
+[package]
+name = "fatwallet"
+version = "0.5.0"
+edition = "2024"
+
+[lib]
+name = "fatwallet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fatwallet"
+path = "src/main.rs"
+
+[dependencies]
+# Solana
+solana-sdk = { version = "4.0", features = ["full"] }
+solana-client = "4.2"
+solana-keypair = { version = "3.1", features = ["seed-derivable"] }
+solana-derivation-path = "3"
+solana-signer = "3"
+solana-commitment-config = "3"
+solana-rpc-client-types = "4"
+solana-account-decoder-client-types = "4"
+solana-transaction-status-client-types = "4"
+solana-system-interface = "2"
+solana-compute-budget-interface = "3"
+solana-instruction = "3"
+solana-signature = "3"
+bincode = "1"
+base64 = "0.22"
+solana-transaction = "4"
+solana-pubkey = "4"
+solana-message = "4"
+spl-token-interface = "2"
+spl-associated-token-account-interface = "2"
+# Key management / crypto
+bip39 = { version = "2.2", features = ["rand"] }
+argon2 = "0.5"
+aes-gcm = "0.11"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.9"
+# TUI
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+# Async / HTTP
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Utils
+anyhow = "1"
+bs58 = "0.5"
+arboard = "3"
+open = "5"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+rpassword = "7"
+thiserror = "2"
+keyring = "4"
+
+[dev-dependencies]
+solana-signer = "3"
+bs58 = "0.5"
+aes-gcm = "0.11"

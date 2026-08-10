@@ -1,0 +1,10 @@
+pub mod addressbook;
+pub mod app;
+pub mod config;
+pub mod error;
+pub mod keyring_helper;
+pub mod price;
+pub mod rpc;
+pub mod token_metadata;
+pub mod tui;
+pub mod wallet;

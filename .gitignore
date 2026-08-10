@@ -1,0 +1,12 @@
+/target
+.megamemory/
+ROADMAP.md
+.opencode/
+.opencode.json
+.opencode.jsonc
+AGENTS.md
+CLAUDE.md
+.claude/
+.cursorrules
+.aider*
+.gemini/
