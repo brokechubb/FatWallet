@@ -41,7 +41,7 @@ cargo build --release
    fatwallet config set-rpc "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
    ```
    Get a free API key at [helius.dev](https://www.helius.dev) — the free plan includes
-   50K credits/day, which is plenty for personal use. Token symbol discovery requires
+   1M credits/month, which is plenty for personal use. Token symbol discovery requires
    Helius DAS support; other RPC providers (e.g. `api.mainnet-beta.solana.com`) work
    but will show truncated mint addresses instead of token symbols.
 
