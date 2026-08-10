@@ -22,7 +22,15 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     // Main layout: header | content | footer
-    let header_h = if area.height > 20 { 4 } else { 3 };
+    // Header: wallet tabs + address + refresh + status (up to 5 lines)
+    let has_status = state.status_message.is_some();
+    let header_h = if area.height > 20 {
+        if has_status { 5 } else { 4 }
+    } else if has_status {
+        4
+    } else {
+        3
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -112,7 +120,14 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Status message (transient notifications)
     let status_line = if let Some(ref msg) = state.status_message {
-        Line::from(vec![Span::styled(msg, Style::default().fg(Color::Blue))])
+        let color = if msg.contains("failed") || msg.contains("Failed") || msg.contains("Error") || msg.contains("error") {
+            Color::Red
+        } else if msg.contains("Sent!") || msg.contains("Swap complete!") || msg.contains("added") || msg.contains("removed") || msg.contains("copied") {
+            Color::Green
+        } else {
+            Color::Blue
+        };
+        Line::from(vec![Span::styled(msg, Style::default().fg(color))])
     } else {
         Line::from("")
     };
@@ -121,7 +136,7 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     if area.height > 3 {
         content.push(refresh_line);
     }
-    if area.height > 4 && !status_line.spans.is_empty() {
+    if !status_line.spans.is_empty() {
         content.push(status_line);
     }
 
@@ -548,7 +563,7 @@ fn render_send(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let (prompt, is_masked) = match state.input_step {
         0 => ("Token (SOL, USDC, USDT, or mint address):", false),
-        1 => ("Amount (or $USD, e.g. $10, or \"all\"/\"max\"):", false),
+        1 => ("Amount ($10 for USD, or token amount):", false),
         2 => (if state.show_contact_picker { "Select recipient (Up/Dn to browse, Tab to type):" } else { "Recipient (address or label, Tab to browse):" }, false),
         3 => ("Passphrase:", true),
         4 => ("Confirm send? Press Enter to submit.", false),
@@ -760,7 +775,7 @@ fn render_swap(frame: &mut Frame, state: &AppState, area: Rect) {
     let (prompt, is_masked) = match state.input_step {
         0 => ("Token in (SOL, USDC, USDT):", false),
         1 => ("Token out (SOL, USDC, USDT):", false),
-        2 => ("Amount to swap (or $USD, or \"all\"/\"max\"):", false),
+        2 => ("Amount ($10 for USD, or token amount):", false),
         3 => ("Passphrase:", true),
         4 => ("Confirm swap? Press Enter to submit.", false),
         _ => ("Done!", false),
@@ -873,7 +888,6 @@ fn render_help(frame: &mut Frame, state: &AppState, area: Rect) {
         Line::from(""),
         Line::from(vec![Span::styled("Amount Field", sec_style)]),
         Line::from(""),
-        Line::from(vec![Span::styled("  all/max ", key_style), Span::styled("Send full balance (SOL reserves 0.01 for gas)", desc_style)]),
         Line::from(vec![Span::styled("  $10     ", key_style), Span::styled("USD amount (converted to token units)", desc_style)]),
         Line::from(vec![Span::styled("  1.5     ", key_style), Span::styled("Raw token amount", desc_style)]),
         Line::from(""),

@@ -726,17 +726,40 @@ fn resolve_token_for_send(token: &str) -> (String, u8) {
 
 /// Resolve "all"/"max" to the actual balance for the given token.
 /// For SOL, reserves 0.01 SOL for gas fees.
+/// For SPL tokens, uses the exact ui_amount_string from RPC for full balance.
 /// Returns None if balance is unavailable or token not found.
-fn resolve_max_amount(state: &AppState, token: &str) -> Option<f64> {
+fn resolve_max_amount(state: &AppState, token: &str) -> Option<String> {
     let token_upper = token.to_uppercase();
-    if token_upper == "SOL" {
+    let known_mints: &[(&str, &str)] = &[
+        ("SOL", "So11111111111111111111111111111111111111112"),
+        ("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+        ("USDT", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"),
+    ];
+
+    // Resolve token input to a canonical mint address
+    let resolved_mint = known_mints.iter()
+        .find(|(sym, _)| sym.eq_ignore_ascii_case(&token_upper))
+        .map(|(_, mint)| mint.to_string())
+        .unwrap_or_else(|| token.to_string());
+
+    if resolved_mint == "So11111111111111111111111111111111111111112" {
         let bal = state.balances.as_ref()?.sol_balance;
-        let max = bal - 0.01; // reserve for gas
-        if max > 0.0 { Some(max) } else { None }
+        let max = bal - 0.01;
+        if max > 0.0 {
+            Some(format!("{:.9}", max))
+        } else {
+            None
+        }
     } else {
         let bal = state.balances.as_ref()?.tokens.iter()
-            .find(|t| t.symbol.eq_ignore_ascii_case(&token_upper) || t.mint == token)?;
-        if bal.amount > 0.0 { Some(bal.amount) } else { None }
+            .find(|t| t.mint == resolved_mint || t.symbol.eq_ignore_ascii_case(&token_upper))?;
+
+        if bal.amount <= 0.0 {
+            return None;
+        }
+
+        // Use the exact ui_amount_string from RPC for full balance
+        Some(bal.ui_amount_string.clone())
     }
 }
 
@@ -748,8 +771,8 @@ fn parse_amount_input(state: &mut AppState, input: &str, token: &str) -> Option<
     if lower == "all" || lower == "max" {
         match resolve_max_amount(state, token) {
             Some(amt) => {
-                state.status_message = Some(format!("Max: {:.9} {}", amt, token));
-                Some(format!("{:.9}", amt))
+                state.status_message = Some(format!("Max: {} {}", amt, token));
+                Some(amt.to_string())
             }
             None => {
                 state.status_message = Some(format!("No balance available for {}", token));
@@ -775,8 +798,8 @@ fn parse_amount_input(state: &mut AppState, input: &str, token: &str) -> Option<
         match price {
             Some(p) if p > 0.0 => {
                 let token_amount = usd / p;
-                state.status_message = Some(format!("${:.2} = {:.9} {}", usd, token_amount, token));
-                Some(format!("{:.9}", token_amount))
+                state.status_message = Some(format!("${:.2} = {} {}", usd, token_amount, token));
+                Some(token_amount.to_string())
             }
             _ => {
                 state.status_message = Some(format!("No price available for {} — enter amount in token units", token));

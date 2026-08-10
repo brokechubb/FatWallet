@@ -52,7 +52,8 @@ pub fn token_decimals(mint: &str) -> u8 {
     }
 }
 
-/// Execute a gasless swap via Jupiter Ultra API.
+/// Execute a swap via Jupiter Ultra API.
+/// Uses gasless mode automatically (Jupiter handles gas).
 /// 1. Get order (base64 tx) from Jupiter
 /// 2. Deserialize, sign with user keypair
 /// 3. Submit signed tx to Jupiter executor
@@ -69,7 +70,6 @@ pub async fn gasless_swap(
     }
 
     let decimals = token_decimals(input_mint);
-    // Use u128 for precision: convert to atomic units without f64 overflow
     let amount_atomic: u64 = {
         let scaled = amount * 10f64.powi(decimals as i32);
         if scaled < 0.0 || scaled > u64::MAX as f64 {
@@ -81,6 +81,9 @@ pub async fn gasless_swap(
         return Err(FatError::rpc("Swap amount rounds to zero").into());
     }
 
+    let client = reqwest::Client::new();
+    let config = crate::config::Config::load().unwrap_or_default();
+
     // 1. Get order from Jupiter Ultra
     let url = format!(
         "{}?inputMint={}&outputMint={}&amount={}&taker={}",
@@ -91,8 +94,6 @@ pub async fn gasless_swap(
         keypair.pubkey()
     );
 
-    let client = reqwest::Client::new();
-    let config = crate::config::Config::load().unwrap_or_default();
     let mut req = client.get(&url);
     if !config.jupiter_api_key.is_empty() {
         req = req.header("x-api-key", &config.jupiter_api_key);
@@ -102,17 +103,25 @@ pub async fn gasless_swap(
         .await
         .map_err(|e| FatError::rpc(format!("Jupiter order request failed: {}", e)))?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(FatError::rpc(format!("Jupiter order HTTP error: {}", text)).into());
+    let resp_status = resp.status();
+    let resp_text = resp.text().await.unwrap_or_default();
+
+    if !resp_status.is_success() {
+        return Err(FatError::rpc(format!(
+            "Jupiter order HTTP {}: {}",
+            resp_status, resp_text
+        ))
+        .into());
     }
 
-    let order: UltraOrderResponse = resp
-        .json()
-        .await
-        .map_err(|e| FatError::rpc(format!("Jupiter order parse failed: {}", e)))?;
+    // Parse the order response
+    let order: UltraOrderResponse = serde_json::from_str(&resp_text)
+        .map_err(|e| FatError::rpc(format!(
+            "Jupiter order parse failed: {} | raw: {}",
+            e, &resp_text[..resp_text.len().min(500)]
+        )))?;
 
-    // Check for errors — Jupiter returns errorCode/errorMessage when simulation fails
+    // Check for errors
     if order.transaction.is_none() {
         let msg = order.error_message.unwrap_or_default();
         let code = order.error_code.as_ref().map(|c| c.to_string()).unwrap_or_default();
@@ -123,10 +132,9 @@ pub async fn gasless_swap(
         .into());
     }
 
-    // Validate the quote — reject if outAmount is suspiciously low
+    // Validate the quote
     if let Some(ref out) = order.out_amount {
         let out_atomic: u128 = out.parse().unwrap_or(0);
-
         if out_atomic == 0 {
             return Err(FatError::rpc("Jupiter quoted zero output — refusing to swap").into());
         }
@@ -169,55 +177,72 @@ pub async fn gasless_swap(
     if !config.jupiter_api_key.is_empty() {
         exec_req = exec_req.header("x-api-key", &config.jupiter_api_key);
     }
-    let resp = exec_req
+    let exec_resp = exec_req
         .json(&execute_body)
         .send()
         .await
         .map_err(|e| FatError::rpc(format!("Jupiter execute request failed: {}", e)))?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(FatError::rpc(format!("Jupiter execute HTTP error: {}", text)).into());
+    let exec_status = exec_resp.status();
+    let exec_text = exec_resp.text().await.unwrap_or_default();
+
+    if !exec_status.is_success() {
+        return Err(FatError::rpc(format!(
+            "Jupiter execute HTTP {}: {}",
+            exec_status, exec_text
+        ))
+        .into());
     }
 
-    let result: UltraExecuteResponse = resp
-        .json()
-        .await
-        .map_err(|e| FatError::rpc(format!("Jupiter execute parse failed: {}", e)))?;
+    // Parse execute response
+    let result: UltraExecuteResponse = serde_json::from_str(&exec_text)
+        .map_err(|e| FatError::rpc(format!(
+            "Jupiter execute parse failed: {} | raw: {}",
+            e, &exec_text[..exec_text.len().min(500)]
+        )))?;
 
     if result.status.as_deref() == Some("Failed") || result.error.is_some() {
         let code_str = result.code.as_ref().map(|c| c.to_string());
         return Err(FatError::rpc(format!(
-            "Swap failed: {}",
-            result.error.or(code_str).unwrap_or("unknown error".to_string())
+            "Swap failed: {} (status: {})",
+            result.error.or(code_str).unwrap_or("unknown error".to_string()),
+            result.status.as_deref().unwrap_or("unknown")
         ))
         .into());
     }
 
     let txid = result
         .txid
-        .ok_or_else(|| FatError::rpc("No transaction signature returned".to_string()))?;
+        .ok_or_else(|| FatError::rpc(format!(
+            "No transaction signature returned. Raw response: {}",
+            &exec_text[..exec_text.len().min(500)]
+        )))?;
 
-    // 5. Confirm the transaction — poll with shorter interval and fewer retries
+    // 5. Confirm the transaction
     let sig: solana_signature::Signature = txid
         .parse()
         .map_err(|e| FatError::rpc(format!("Invalid signature: {}", e)))?;
 
-    for _ in 0..15 {
+    for attempt in 0..15 {
         match rpc.client.get_signature_status(&sig).await {
             Ok(Some(Ok(()))) => return Ok(txid),
             Ok(Some(Err(e))) => {
-                return Err(FatError::rpc(format!("Transaction failed on-chain: {:?}", e)).into());
+                return Err(FatError::rpc(format!(
+                    "Transaction failed on-chain (attempt {}): {:?}",
+                    attempt + 1, e
+                ))
+                .into());
             }
             Ok(None) => {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("RPC error checking status (attempt {}): {}", attempt + 1, e);
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         }
     }
 
-    // Return the txid even if confirmation times out — it may still land
-    Ok(txid)
+    // Timeout — return txid anyway, it may still land
+    Ok(format!("{} (confirmation timeout — check solscan)", txid))
 }
