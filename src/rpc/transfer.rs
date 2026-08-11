@@ -8,6 +8,8 @@ use solana_transaction::Transaction;
 
 use crate::error::FatError;
 
+pub type ProgressFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -18,6 +20,7 @@ pub async fn transfer_sol(
     sender: &Keypair,
     recipient: &str,
     amount_sol: f64,
+    progress: Option<ProgressFn>,
 ) -> Result<String> {
     let recipient_pk: Pubkey = recipient
         .parse()
@@ -48,7 +51,7 @@ pub async fn transfer_sol(
         lamports,
     ));
 
-    send_and_confirm(rpc, sender, instructions).await
+    send_and_confirm(rpc, sender, instructions, progress).await
 }
 
 /// Transfer an SPL token to a recipient. Auto-creates recipient ATA if needed.
@@ -59,6 +62,7 @@ pub async fn transfer_spl(
     mint: &str,
     amount: f64,
     decimals: u8,
+    progress: Option<ProgressFn>,
 ) -> Result<String> {
     let recipient_pk: Pubkey = recipient
         .parse()
@@ -108,6 +112,9 @@ pub async fn transfer_spl(
     // Check if recipient ATA exists; if not, create it (idempotent)
     let recipient_ata_exists = rpc.client.get_account(&recipient_ata).await.is_ok();
     if !recipient_ata_exists {
+        if let Some(ref p) = progress {
+            p("Creating recipient token account...");
+        }
         instructions.push(
             spl_associated_token_account_interface::instruction::create_associated_token_account_idempotent(
                 &sender.pubkey(),
@@ -119,6 +126,9 @@ pub async fn transfer_spl(
     }
 
     // Token transfer instruction
+    if let Some(ref p) = progress {
+        p("Building transfer instruction...");
+    }
     instructions.push(spl_token_interface::instruction::transfer(
         &token_program,
         &sender_ata,
@@ -128,7 +138,7 @@ pub async fn transfer_spl(
         atomic_amount,
     )?);
 
-    send_and_confirm(rpc, sender, instructions).await
+    send_and_confirm(rpc, sender, instructions, progress).await
 }
 
 /// Unified transfer: if mint == SOL_MINT, do SOL transfer; otherwise SPL.
@@ -140,10 +150,23 @@ pub async fn transfer(
     amount: f64,
     decimals: u8,
 ) -> Result<String> {
+    transfer_with_progress(rpc, sender, recipient, mint, amount, decimals, None).await
+}
+
+/// Unified transfer with a progress callback for UI feedback.
+pub async fn transfer_with_progress(
+    rpc: &super::Rpc,
+    sender: &Keypair,
+    recipient: &str,
+    mint: &str,
+    amount: f64,
+    decimals: u8,
+    progress: Option<ProgressFn>,
+) -> Result<String> {
     if mint == SOL_MINT {
-        transfer_sol(rpc, sender, recipient, amount).await
+        transfer_sol(rpc, sender, recipient, amount, progress).await
     } else {
-        transfer_spl(rpc, sender, recipient, mint, amount, decimals).await
+        transfer_spl(rpc, sender, recipient, mint, amount, decimals, progress).await
     }
 }
 
@@ -185,11 +208,15 @@ async fn send_and_confirm(
     rpc: &super::Rpc,
     sender: &Keypair,
     instructions: Vec<solana_instruction::Instruction>,
+    progress: Option<ProgressFn>,
 ) -> Result<String> {
     let max_retries = 3;
     let mut last_err = String::new();
 
     for attempt in 0..max_retries {
+        if let Some(ref p) = progress {
+            p("Fetching blockhash...");
+        }
         let blockhash = rpc
             .client
             .get_latest_blockhash()
@@ -199,18 +226,29 @@ async fn send_and_confirm(
         let mut tx = Transaction::new_with_payer(&instructions, Some(&sender.pubkey()));
         tx.sign(&[sender], blockhash);
 
+        if let Some(ref p) = progress {
+            p("Submitting transaction...");
+        }
         match rpc
             .client
             .send_and_confirm_transaction(&tx)
             .await
         {
-            Ok(signature) => return Ok(signature.to_string()),
+            Ok(signature) => {
+                if let Some(ref p) = progress {
+                    p("Confirming on-chain...");
+                }
+                return Ok(signature.to_string());
+            }
             Err(e) => {
                 let err_str = e.to_string();
                 last_err = err_str.clone();
                 // Retry on blockhash expiry
                 if err_str.contains("BlockhashNotFound") || err_str.contains("blockhash") {
                     eprintln!("Blockhash expired, retrying ({}/{})", attempt + 1, max_retries);
+                    if let Some(ref p) = progress {
+                        p(&format!("Blockhash expired — retry {}/{}", attempt + 1, max_retries));
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     continue;
                 }

@@ -119,6 +119,11 @@ async fn run_event_loop(
     ));
     refresh_interval.tick().await;
 
+    // UI animation tick — drives the pending-tx spinner and elapsed timer.
+    // The select! branch is guarded so it only fires while a tx is in flight.
+    let mut ui_tick = tokio::time::interval(Duration::from_millis(500));
+    ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         terminal.draw(|f| dashboard::render(f, &state))?;
 
@@ -143,26 +148,39 @@ async fn run_event_loop(
                         state.set_transactions(txs);
                     }
                     Message::SendResult(Ok(sig)) => {
-                        state.status_message = Some(format!("Sent! https://solscan.io/tx/{}", sig));
+                        state.finish_tx();
+                        state.status_message = Some(format!("✓ Sent! https://solscan.io/tx/{}", sig));
                         state.refresh_state = RefreshState::Loading;
                         spawn_balance_refresh(&rpc, &price_svc, &state, event_tx.clone());
                     }
                     Message::SendResult(Err(e)) => {
-                        state.status_message = Some(format!("Send failed: {}", e));
+                        state.finish_tx();
+                        state.status_message = Some(format!("✗ Send failed: {}", e));
+                    }
+                    Message::SendProgress(stage) => {
+                        state.update_tx_stage(&stage);
                     }
                     Message::SwapResult(Ok(sig)) => {
-                        state.status_message = Some(format!("Swap complete! https://solscan.io/tx/{}", sig));
+                        state.finish_tx();
+                        state.status_message = Some(format!("✓ Swap complete! https://solscan.io/tx/{}", sig));
                         state.refresh_state = RefreshState::Loading;
                         spawn_balance_refresh(&rpc, &price_svc, &state, event_tx.clone());
                     }
                     Message::SwapResult(Err(e)) => {
-                        state.status_message = Some(format!("Swap failed: {}", e));
+                        state.finish_tx();
+                        state.status_message = Some(format!("✗ Swap failed: {}", e));
+                    }
+                    Message::SwapProgress(stage) => {
+                        state.update_tx_stage(&stage);
                     }
                     Message::Error(e) => {
                         state.set_error(e);
                     }
                     _ => {}
                 }
+            }
+            _ = ui_tick.tick(), if state.tx_pending_kind.is_some() => {
+                // Redraw to animate the pending spinner / elapsed timer.
             }
             _ = refresh_interval.tick() => {
                 if state.refresh_state != RefreshState::Loading && state.ui_mode == UIMode::Dashboard {
@@ -257,6 +275,10 @@ fn handle_dashboard_key(
             state.input_field.clear();
             state.input_step = 0;
             state.status_message = None;
+            state.temp_token.clear();
+            state.temp_amount.clear();
+            state.temp_recipient.clear();
+            state.temp_passphrase.clear();
             state.contacts = crate::addressbook::AddressBook::load().ok();
         }
         KeyCode::Char('a') => { state.ui_mode = UIMode::Contacts; state.input_field.clear(); state.input_step = 0; state.contacts = crate::addressbook::AddressBook::load().ok(); state.status_message = None; }
@@ -266,6 +288,10 @@ fn handle_dashboard_key(
             state.input_field.clear();
             state.input_step = 0;
             state.status_message = None;
+            state.temp_token.clear();
+            state.temp_amount.clear();
+            state.temp_label.clear();
+            state.temp_passphrase.clear();
         }
         KeyCode::Down => {
             match state.ui_mode {
@@ -659,6 +685,10 @@ fn handle_send_key(
 
                             let event_tx2 = event_tx.clone();
                             let keypair_bytes = unlocked.keypair.to_bytes();
+                            let progress_tx = event_tx.clone();
+                            let progress = std::sync::Arc::new(move |stage: &str| {
+                                let _ = progress_tx.try_send(Message::SendProgress(stage.to_string()));
+                            }) as crate::rpc::transfer::ProgressFn;
                             tokio::spawn(async move {
                                 let rpc = match crate::rpc::Rpc::from_config() {
                                     Ok(r) => r,
@@ -674,7 +704,7 @@ fn handle_send_key(
                                         return;
                                     }
                                 };
-                                match crate::rpc::transfer::transfer(&rpc, &kp, &recipient, &mint, amount, decimals).await {
+                                match crate::rpc::transfer::transfer_with_progress(&rpc, &kp, &recipient, &mint, amount, decimals, Some(progress)).await {
                                     Ok(sig) => {
                                         let _ = event_tx2.send(Message::SendResult(Ok(sig))).await;
                                     }
@@ -684,11 +714,14 @@ fn handle_send_key(
                                 }
                             });
 
-                            state.status_message = Some("Sending...".to_string());
+                            state.start_tx(crate::app::state::TxPendingKind::Send, "Sending...");
                             state.ui_mode = UIMode::Dashboard;
                             state.input_field.clear();
                             state.input_step = 0;
                             state.temp_passphrase.clear();
+                            state.temp_recipient.clear();
+                            state.temp_amount.clear();
+                            state.temp_token.clear();
                         }
                         Err(e) => {
                             state.status_message = Some(format!("Unlock failed: {}", e));
@@ -883,6 +916,10 @@ fn handle_swap_key(
 
                             let event_tx2 = event_tx.clone();
                             let keypair_bytes = unlocked.keypair.to_bytes();
+                            let progress_tx = event_tx.clone();
+                            let progress = std::sync::Arc::new(move |stage: &str| {
+                                let _ = progress_tx.try_send(Message::SwapProgress(stage.to_string()));
+                            }) as crate::rpc::transfer::ProgressFn;
                             tokio::spawn(async move {
                                 let rpc = match crate::rpc::Rpc::from_config() {
                                     Ok(r) => r,
@@ -898,7 +935,7 @@ fn handle_swap_key(
                                         return;
                                     }
                                 };
-                                match crate::rpc::swap::gasless_swap(&rpc, &kp, &input_mint, &output_mint, amount).await {
+                                match crate::rpc::swap::gasless_swap_with_progress(&rpc, &kp, &input_mint, &output_mint, amount, Some(progress)).await {
                                     Ok(sig) => {
                                         let _ = event_tx2.send(Message::SwapResult(Ok(sig))).await;
                                     }
@@ -908,11 +945,14 @@ fn handle_swap_key(
                                 }
                             });
 
-                            state.status_message = Some("Swapping...".to_string());
+                            state.start_tx(crate::app::state::TxPendingKind::Swap, "Swapping...");
                             state.ui_mode = UIMode::Dashboard;
                             state.input_field.clear();
                             state.input_step = 0;
                             state.temp_passphrase.clear();
+                            state.temp_token.clear();
+                            state.temp_amount.clear();
+                            state.temp_label.clear();
                         }
                         Err(e) => {
                             state.status_message = Some(format!("Unlock failed: {}", e));

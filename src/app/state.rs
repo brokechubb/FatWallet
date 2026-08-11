@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::addressbook::AddressBook;
 use crate::rpc::balance::WalletBalances;
@@ -33,6 +34,12 @@ pub enum RefreshState {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxPendingKind {
+    Send,
+    Swap,
+}
+
 pub struct AppState {
     pub wallets: Vec<WalletInfo>,
     pub active_wallet_idx: usize,
@@ -46,6 +53,9 @@ pub struct AppState {
     pub tx_detail_idx: Option<usize>,
     pub help_scroll: u16,
     pub status_message: Option<String>,
+    pub tx_pending_kind: Option<TxPendingKind>,
+    pub tx_pending_stage: Option<String>,
+    pub tx_pending_start: Option<Instant>,
     pub should_quit: bool,
     // Input handling for TUI forms
     pub input_field: String,
@@ -78,6 +88,9 @@ impl AppState {
             tx_detail_idx: None,
             help_scroll: 0,
             status_message: None,
+            tx_pending_kind: None,
+            tx_pending_stage: None,
+            tx_pending_start: None,
             should_quit: false,
             input_field: String::new(),
             input_step: 0,
@@ -162,5 +175,25 @@ impl AppState {
     pub fn set_error(&mut self, msg: String) {
         self.refresh_state = RefreshState::Error;
         self.last_error = Some(msg);
+    }
+
+    pub fn start_tx(&mut self, kind: TxPendingKind, stage: &str) {
+        self.tx_pending_kind = Some(kind);
+        self.tx_pending_stage = Some(stage.to_string());
+        self.tx_pending_start = Some(Instant::now());
+        self.status_message = Some(stage.to_string());
+    }
+
+    pub fn update_tx_stage(&mut self, stage: &str) {
+        if self.tx_pending_kind.is_some() {
+            self.tx_pending_stage = Some(stage.to_string());
+            self.status_message = Some(stage.to_string());
+        }
+    }
+
+    pub fn finish_tx(&mut self) {
+        self.tx_pending_kind = None;
+        self.tx_pending_stage = None;
+        self.tx_pending_start = None;
     }
 }

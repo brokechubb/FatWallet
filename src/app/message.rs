@@ -12,8 +12,12 @@ pub enum Message {
     TransactionsLoaded(Vec<TxHistoryEntry>),
     /// Send transaction result
     SendResult(Result<String, String>),
+    /// Send transaction progress update
+    SendProgress(String),
     /// Swap transaction result
     SwapResult(Result<String, String>),
+    /// Swap transaction progress update
+    SwapProgress(String),
     /// Refresh tick (periodic)
     RefreshTick,
     /// Error during async operation

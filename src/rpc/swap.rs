@@ -7,6 +7,8 @@ use solana_transaction::versioned::VersionedTransaction;
 
 use crate::error::FatError;
 
+pub use super::transfer::ProgressFn;
+
 const JUPITER_ULTRA_ORDER_URL: &str = "https://lite-api.jup.ag/ultra/v1/order";
 const JUPITER_ULTRA_EXECUTE_URL: &str = "https://lite-api.jup.ag/ultra/v1/execute";
 
@@ -65,6 +67,22 @@ pub async fn gasless_swap(
     output_mint: &str,
     amount: f64,
 ) -> Result<String> {
+    gasless_swap_with_progress(rpc, keypair, input_mint, output_mint, amount, None).await
+}
+
+pub async fn gasless_swap_with_progress(
+    rpc: &super::Rpc,
+    keypair: &Keypair,
+    input_mint: &str,
+    output_mint: &str,
+    amount: f64,
+    progress: Option<ProgressFn>,
+) -> Result<String> {
+    fn report(p: &Option<ProgressFn>, msg: &str) {
+        if let Some(ref f) = *p {
+            f(msg);
+        }
+    }
     if amount <= 0.0 {
         return Err(FatError::rpc("Swap amount must be positive").into());
     }
@@ -83,6 +101,8 @@ pub async fn gasless_swap(
 
     let client = reqwest::Client::new();
     let config = crate::config::Config::load().unwrap_or_default();
+
+    report(&progress, "Requesting swap quote from Jupiter...");
 
     // 1. Get order from Jupiter Ultra
     let url = format!(
@@ -143,6 +163,8 @@ pub async fn gasless_swap(
     let tx_base64 = order.transaction.unwrap();
     let request_id = order.request_id.unwrap_or_default();
 
+    report(&progress, "Signing swap transaction...");
+
     // 2. Deserialize the versioned transaction from base64
     let tx_bytes = base64::engine::general_purpose::STANDARD
         .decode(&tx_base64)
@@ -170,6 +192,8 @@ pub async fn gasless_swap(
         "signedTransaction": signed_b64,
         "requestId": request_id,
     });
+
+    report(&progress, "Submitting signed swap to Jupiter...");
 
     let mut exec_req = client
         .post(JUPITER_ULTRA_EXECUTE_URL)
@@ -219,6 +243,7 @@ pub async fn gasless_swap(
         )))?;
 
     // 5. Confirm the transaction
+    report(&progress, "Confirming swap on-chain...");
     let sig: solana_signature::Signature = txid
         .parse()
         .map_err(|e| FatError::rpc(format!("Invalid signature: {}", e)))?;
@@ -234,6 +259,9 @@ pub async fn gasless_swap(
                 .into());
             }
             Ok(None) => {
+                if attempt == 0 || attempt % 3 == 0 {
+                    report(&progress, &format!("Waiting for confirmation (attempt {}/15)...", attempt + 1));
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             Err(e) => {

@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::state::{AppState, ImportMode, RefreshState, UIMode};
+use crate::app::state::{AppState, ImportMode, RefreshState, TxPendingKind, UIMode};
 use crate::rpc::transactions::TxDirection;
 
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -22,15 +22,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     // Main layout: header | content | footer
-    // Header: wallet tabs + address + refresh + status (up to 5 lines)
-    let has_status = state.status_message.is_some();
-    let header_h = if area.height > 20 {
-        if has_status { 5 } else { 4 }
-    } else if has_status {
-        4
-    } else {
-        3
-    };
+    // Header content lines: wallet tabs + address + refresh + status/pending + 2 border rows
+    let tx_pending = state.tx_pending_kind.is_some();
+    let has_status = !tx_pending && state.status_message.is_some();
+    let header_h = if tx_pending || has_status { 6 } else { 5 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -118,16 +113,55 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         RefreshState::Idle => Line::from(""),
     };
 
-    // Status message (transient notifications)
-    let status_line = if let Some(ref msg) = state.status_message {
-        let color = if msg.contains("failed") || msg.contains("Failed") || msg.contains("Error") || msg.contains("error") {
-            Color::Red
-        } else if msg.contains("Sent!") || msg.contains("Swap complete!") || msg.contains("added") || msg.contains("removed") || msg.contains("copied") {
-            Color::Green
+    // Status message (transient notifications) — suppressed while a tx is pending,
+    // since the pending line takes its place.
+    let status_line = if state.tx_pending_kind.is_none() {
+        if let Some(ref msg) = state.status_message {
+            let color = if msg.contains("failed") || msg.contains("Failed") || msg.contains("Error") || msg.contains("error") || msg.starts_with("✗") {
+                Color::Red
+            } else if msg.contains("Sent!") || msg.contains("Swap complete!") || msg.starts_with("✓") || msg.contains("added") || msg.contains("removed") || msg.contains("copied") {
+                Color::Green
+            } else {
+                Color::Blue
+            };
+            Line::from(vec![Span::styled(msg, Style::default().fg(color))])
         } else {
-            Color::Blue
+            Line::from("")
+        }
+    } else {
+        Line::from("")
+    };
+
+    // Pending transaction indicator — prominent, animated, always shown while in flight.
+    let pending_line = if let Some(kind) = state.tx_pending_kind {
+        let spinner = if let Some(start) = state.tx_pending_start {
+            let elapsed = start.elapsed().as_secs();
+            match elapsed % 4 {
+                0 => "[|]",
+                1 => "[/]",
+                2 => "[-]",
+                _ => "[\\]",
+            }
+        } else {
+            "[ ]"
         };
-        Line::from(vec![Span::styled(msg, Style::default().fg(color))])
+        let label = match kind {
+            TxPendingKind::Send => "SEND IN PROGRESS",
+            TxPendingKind::Swap => "SWAP IN PROGRESS",
+        };
+        let stage = state.tx_pending_stage.as_deref().unwrap_or("Working...");
+        let elapsed_str = state.tx_pending_start
+            .map(|s| {
+                let e = s.elapsed().as_secs();
+                if e < 60 { format!("{}s", e) } else { format!("{}m{:02}s", e / 60, e % 60) }
+            })
+            .unwrap_or_default();
+        Line::from(vec![
+            Span::styled(format!(" {} ", spinner), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} ", label), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(stage, Style::default().fg(Color::White)),
+            Span::styled(format!("  {}", elapsed_str), Style::default().fg(Color::DarkGray)),
+        ])
     } else {
         Line::from("")
     };
@@ -136,7 +170,9 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     if area.height > 3 {
         content.push(refresh_line);
     }
-    if !status_line.spans.is_empty() {
+    if !pending_line.spans.is_empty() {
+        content.push(pending_line);
+    } else if !status_line.spans.is_empty() {
         content.push(status_line);
     }
 
