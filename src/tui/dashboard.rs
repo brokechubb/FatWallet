@@ -22,10 +22,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     // Main layout: header | content | footer
-    // Header content lines: wallet tabs + address + refresh + status/pending + 2 border rows
-    let tx_pending = state.tx_pending_kind.is_some();
-    let has_status = !tx_pending && state.status_message.is_some();
-    let header_h = if tx_pending || has_status { 6 } else { 5 };
+    // Header content lines: wallet tabs + address + combined status + 2 border rows
+    let has_status = state.tx_pending_kind.is_some()
+        || state.status_message.is_some()
+        || state.refresh_state != RefreshState::Idle;
+    let header_h = if has_status { 5 } else { 4 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -97,43 +98,11 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         Line::from("")
     };
 
-    // Refresh status
-    let refresh_line = match state.refresh_state {
-        RefreshState::Loading => Line::from(vec![Span::styled(
-            "Loading...",
-            Style::default().fg(Color::Yellow),
-        )]),
-        RefreshState::Error => Line::from(vec![Span::styled(
-            format!(
-                "Error: {}",
-                state.last_error.as_deref().unwrap_or("unknown")
-            ),
-            Style::default().fg(Color::Red),
-        )]),
-        RefreshState::Idle => Line::from(""),
-    };
+    // Combined status line: pending-tx indicator or transient status message,
+    // with the refresh state appended, all on a single line.
+    let mut status_spans: Vec<Span> = Vec::new();
 
-    // Status message (transient notifications) — suppressed while a tx is pending,
-    // since the pending line takes its place.
-    let status_line = if state.tx_pending_kind.is_none() {
-        if let Some(ref msg) = state.status_message {
-            let color = if msg.contains("failed") || msg.contains("Failed") || msg.contains("Error") || msg.contains("error") || msg.starts_with("✗") {
-                Color::Red
-            } else if msg.contains("Sent!") || msg.contains("Swap complete!") || msg.starts_with("✓") || msg.contains("added") || msg.contains("removed") || msg.contains("copied") {
-                Color::Green
-            } else {
-                Color::Blue
-            };
-            Line::from(vec![Span::styled(msg, Style::default().fg(color))])
-        } else {
-            Line::from("")
-        }
-    } else {
-        Line::from("")
-    };
-
-    // Pending transaction indicator — prominent, animated, always shown while in flight.
-    let pending_line = if let Some(kind) = state.tx_pending_kind {
+    if let Some(kind) = state.tx_pending_kind {
         let spinner = if let Some(start) = state.tx_pending_start {
             let elapsed = start.elapsed().as_secs();
             match elapsed % 4 {
@@ -156,23 +125,44 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
                 if e < 60 { format!("{}s", e) } else { format!("{}m{:02}s", e / 60, e % 60) }
             })
             .unwrap_or_default();
-        Line::from(vec![
-            Span::styled(format!(" {} ", spinner), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{} ", label), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(stage, Style::default().fg(Color::White)),
-            Span::styled(format!("  {}", elapsed_str), Style::default().fg(Color::DarkGray)),
-        ])
-    } else {
-        Line::from("")
-    };
+        status_spans.push(Span::styled(format!(" {} ", spinner), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        status_spans.push(Span::styled(format!("{} ", label), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        status_spans.push(Span::styled(stage, Style::default().fg(Color::White)));
+        status_spans.push(Span::styled(format!("  {}", elapsed_str), Style::default().fg(Color::DarkGray)));
+    } else if let Some(ref msg) = state.status_message {
+        let color = if msg.contains("failed") || msg.contains("Failed") || msg.contains("Error") || msg.contains("error") || msg.starts_with("✗") {
+            Color::Red
+        } else if msg.contains("Sent!") || msg.contains("Swap complete!") || msg.starts_with("✓") || msg.contains("added") || msg.contains("removed") || msg.contains("copied") {
+            Color::Green
+        } else {
+            Color::Blue
+        };
+        status_spans.push(Span::styled(msg, Style::default().fg(color)));
+    }
+
+    match state.refresh_state {
+        RefreshState::Loading => {
+            if !status_spans.is_empty() {
+                status_spans.push(Span::styled("  •  ", Style::default().fg(Color::DarkGray)));
+            }
+            status_spans.push(Span::styled("Refreshing...", Style::default().fg(Color::Yellow)));
+        }
+        RefreshState::Error => {
+            if !status_spans.is_empty() {
+                status_spans.push(Span::styled("  •  ", Style::default().fg(Color::DarkGray)));
+            }
+            status_spans.push(Span::styled(
+                format!("Error: {}", state.last_error.as_deref().unwrap_or("unknown")),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        RefreshState::Idle => {}
+    }
+
+    let status_line = Line::from(status_spans);
 
     let mut content = vec![wallet_line, addr_line];
-    if area.height > 3 {
-        content.push(refresh_line);
-    }
-    if !pending_line.spans.is_empty() {
-        content.push(pending_line);
-    } else if !status_line.spans.is_empty() {
+    if !status_line.spans.is_empty() {
         content.push(status_line);
     }
 

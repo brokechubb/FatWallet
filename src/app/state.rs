@@ -1,10 +1,13 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::addressbook::AddressBook;
 use crate::rpc::balance::WalletBalances;
 use crate::rpc::transactions::TxHistoryEntry;
 use crate::wallet::WalletInfo;
+
+/// How long a transient status message stays visible before auto-clearing.
+const STATUS_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UIMode {
@@ -53,6 +56,7 @@ pub struct AppState {
     pub tx_detail_idx: Option<usize>,
     pub help_scroll: u16,
     pub status_message: Option<String>,
+    pub status_message_at: Option<Instant>,
     pub tx_pending_kind: Option<TxPendingKind>,
     pub tx_pending_stage: Option<String>,
     pub tx_pending_start: Option<Instant>,
@@ -88,6 +92,7 @@ impl AppState {
             tx_detail_idx: None,
             help_scroll: 0,
             status_message: None,
+            status_message_at: None,
             tx_pending_kind: None,
             tx_pending_stage: None,
             tx_pending_start: None,
@@ -181,13 +186,13 @@ impl AppState {
         self.tx_pending_kind = Some(kind);
         self.tx_pending_stage = Some(stage.to_string());
         self.tx_pending_start = Some(Instant::now());
-        self.status_message = Some(stage.to_string());
+        self.set_status(stage);
     }
 
     pub fn update_tx_stage(&mut self, stage: &str) {
         if self.tx_pending_kind.is_some() {
             self.tx_pending_stage = Some(stage.to_string());
-            self.status_message = Some(stage.to_string());
+            self.set_status(stage);
         }
     }
 
@@ -195,5 +200,25 @@ impl AppState {
         self.tx_pending_kind = None;
         self.tx_pending_stage = None;
         self.tx_pending_start = None;
+    }
+
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.status_message_at = Some(Instant::now());
+    }
+
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+        self.status_message_at = None;
+    }
+
+    /// Clear the status message if it has been visible longer than STATUS_TTL.
+    pub fn expire_status(&mut self) {
+        let expired = self
+            .status_message_at
+            .map_or(false, |at| at.elapsed() >= STATUS_TTL);
+        if expired {
+            self.clear_status();
+        }
     }
 }

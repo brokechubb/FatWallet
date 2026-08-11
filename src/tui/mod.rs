@@ -149,26 +149,26 @@ async fn run_event_loop(
                     }
                     Message::SendResult(Ok(sig)) => {
                         state.finish_tx();
-                        state.status_message = Some(format!("✓ Sent! https://solscan.io/tx/{}", sig));
+                        state.set_status(format!("✓ Sent! https://solscan.io/tx/{}", sig));
                         state.refresh_state = RefreshState::Loading;
                         spawn_balance_refresh(&rpc, &price_svc, &state, event_tx.clone());
                     }
                     Message::SendResult(Err(e)) => {
                         state.finish_tx();
-                        state.status_message = Some(format!("✗ Send failed: {}", e));
+                        state.set_status(format!("✗ Send failed: {}", e));
                     }
                     Message::SendProgress(stage) => {
                         state.update_tx_stage(&stage);
                     }
                     Message::SwapResult(Ok(sig)) => {
                         state.finish_tx();
-                        state.status_message = Some(format!("✓ Swap complete! https://solscan.io/tx/{}", sig));
+                        state.set_status(format!("✓ Swap complete! https://solscan.io/tx/{}", sig));
                         state.refresh_state = RefreshState::Loading;
                         spawn_balance_refresh(&rpc, &price_svc, &state, event_tx.clone());
                     }
                     Message::SwapResult(Err(e)) => {
                         state.finish_tx();
-                        state.status_message = Some(format!("✗ Swap failed: {}", e));
+                        state.set_status(format!("✗ Swap failed: {}", e));
                     }
                     Message::SwapProgress(stage) => {
                         state.update_tx_stage(&stage);
@@ -179,8 +179,10 @@ async fn run_event_loop(
                     _ => {}
                 }
             }
-            _ = ui_tick.tick(), if state.tx_pending_kind.is_some() => {
-                // Redraw to animate the pending spinner / elapsed timer.
+            _ = ui_tick.tick(), if state.tx_pending_kind.is_some() || state.status_message.is_some() => {
+                // Redraw to animate the pending spinner / elapsed timer,
+                // and auto-clear status messages after their TTL.
+                state.expire_status();
             }
             _ = refresh_interval.tick() => {
                 if state.refresh_state != RefreshState::Loading && state.ui_mode == UIMode::Dashboard {
@@ -254,40 +256,40 @@ fn handle_dashboard_key(
             state.import_mode = crate::app::state::ImportMode::Create;
             state.input_field.clear();
             state.input_step = 0;
-            state.status_message = None;
+            state.clear_status();
         }
         KeyCode::Char('i') => {
             state.ui_mode = UIMode::Import;
             state.import_mode = crate::app::state::ImportMode::ImportSeed;
             state.input_field.clear();
             state.input_step = 0;
-            state.status_message = None;
+            state.clear_status();
         }
         KeyCode::Char('k') => {
             state.ui_mode = UIMode::Import;
             state.import_mode = crate::app::state::ImportMode::ImportKey;
             state.input_field.clear();
             state.input_step = 0;
-            state.status_message = None;
+            state.clear_status();
         }
         KeyCode::Char('s') => {
             state.ui_mode = UIMode::Send;
             state.input_field.clear();
             state.input_step = 0;
-            state.status_message = None;
+            state.clear_status();
             state.temp_token.clear();
             state.temp_amount.clear();
             state.temp_recipient.clear();
             state.temp_passphrase.clear();
             state.contacts = crate::addressbook::AddressBook::load().ok();
         }
-        KeyCode::Char('a') => { state.ui_mode = UIMode::Contacts; state.input_field.clear(); state.input_step = 0; state.contacts = crate::addressbook::AddressBook::load().ok(); state.status_message = None; }
+        KeyCode::Char('a') => { state.ui_mode = UIMode::Contacts; state.input_field.clear(); state.input_step = 0; state.contacts = crate::addressbook::AddressBook::load().ok(); state.clear_status(); }
         KeyCode::Char('h') => { state.ui_mode = UIMode::Help; state.help_scroll = 0; }
         KeyCode::Char('x') => {
             state.ui_mode = UIMode::Swap;
             state.input_field.clear();
             state.input_step = 0;
-            state.status_message = None;
+            state.clear_status();
             state.temp_token.clear();
             state.temp_amount.clear();
             state.temp_label.clear();
@@ -335,8 +337,8 @@ fn handle_dashboard_key(
                     if let Some(tx) = state.transactions.get(idx) {
                         let sig = tx.signature.clone();
                         match arboard::Clipboard::new().and_then(|mut c| c.set_text(sig)) {
-                            Ok(_) => state.status_message = Some("Signature copied to clipboard".to_string()),
-                            Err(_) => state.status_message = Some("Failed to copy".to_string()),
+                            Ok(_) => state.set_status("Signature copied to clipboard".to_string()),
+                            Err(_) => state.set_status("Failed to copy".to_string()),
                         }
                     }
                 }
@@ -344,8 +346,8 @@ fn handle_dashboard_key(
             if state.ui_mode == UIMode::Receive {
                 if let Some(addr) = state.active_pubkey() {
                     match arboard::Clipboard::new().and_then(|mut c| c.set_text(addr)) {
-                        Ok(_) => state.status_message = Some("Address copied to clipboard".to_string()),
-                        Err(_) => state.status_message = Some("Failed to copy".to_string()),
+                        Ok(_) => state.set_status("Address copied to clipboard".to_string()),
+                        Err(_) => state.set_status("Failed to copy".to_string()),
                     }
                 }
             }
@@ -356,8 +358,8 @@ fn handle_dashboard_key(
                     if let Some(tx) = state.transactions.get(idx) {
                         let url = format!("https://solscan.io/tx/{}", tx.signature);
                         match open::that(&url) {
-                            Ok(_) => state.status_message = Some("Opened in browser".to_string()),
-                            Err(_) => state.status_message = Some("Failed to open browser".to_string()),
+                            Ok(_) => state.set_status("Opened in browser".to_string()),
+                            Err(_) => state.set_status("Failed to open browser".to_string()),
                         }
                     }
                 }
@@ -393,7 +395,7 @@ fn handle_import_key(
                         1 => {
                             // Confirm passphrase
                             if state.input_field != state.temp_passphrase {
-                                state.status_message = Some("Passphrases do not match".to_string());
+                                state.set_status("Passphrases do not match".to_string());
                                 state.input_field.clear();
                                 state.input_step = 0;
                                 state.temp_passphrase.clear();
@@ -408,7 +410,7 @@ fn handle_import_key(
                             let passphrase = state.temp_passphrase.clone();
                             match wallet::create_wallet(&label, &passphrase) {
                                 Ok((info, mnemonic)) => {
-                                    state.status_message = Some(format!(
+                                    state.set_status(format!(
                                         "Wallet created: {} ({}) — seed: {}",
                                         info.label, info.pubkey, mnemonic
                                     ));
@@ -428,7 +430,7 @@ fn handle_import_key(
                                     state.temp_passphrase.clear();
                                 }
                                 Err(e) => {
-                                    state.status_message = Some(format!("Error: {}", e));
+                                    state.set_status(format!("Error: {}", e));
                                     state.input_field.clear();
                                     state.input_step = 0;
                                     state.temp_passphrase.clear();
@@ -447,7 +449,7 @@ fn handle_import_key(
                         }
                         1 => {
                             if state.input_field != state.temp_passphrase {
-                                state.status_message = Some("Passphrases do not match".to_string());
+                                state.set_status("Passphrases do not match".to_string());
                                 state.input_field.clear();
                                 state.input_step = 0;
                                 state.temp_passphrase.clear();
@@ -469,7 +471,7 @@ fn handle_import_key(
                             let seed = state.temp_seed.clone();
                             match wallet::import_from_seed_phrase(&seed, &passphrase, &label, 0, 0) {
                                 Ok(info) => {
-                                    state.status_message = Some(format!(
+                                    state.set_status(format!(
                                         "Wallet imported: {} ({})", info.label, info.pubkey
                                     ));
                                     if let Ok(wallets) = wallet::list_wallets() {
@@ -488,7 +490,7 @@ fn handle_import_key(
                                     state.temp_seed.clear();
                                 }
                                 Err(e) => {
-                                    state.status_message = Some(format!("Error: {}", e));
+                                    state.set_status(format!("Error: {}", e));
                                     state.input_field.clear();
                                     state.input_step = 2;
                                     state.temp_seed.clear();
@@ -507,7 +509,7 @@ fn handle_import_key(
                         }
                         1 => {
                             if state.input_field != state.temp_passphrase {
-                                state.status_message = Some("Passphrases do not match".to_string());
+                                state.set_status("Passphrases do not match".to_string());
                                 state.input_field.clear();
                                 state.input_step = 0;
                                 state.temp_passphrase.clear();
@@ -529,7 +531,7 @@ fn handle_import_key(
                             let key = state.temp_seed.clone();
                             match wallet::import_from_private_key(&key, &passphrase, &label) {
                                 Ok(info) => {
-                                    state.status_message = Some(format!(
+                                    state.set_status(format!(
                                         "Wallet imported: {} ({})", info.label, info.pubkey
                                     ));
                                     if let Ok(wallets) = wallet::list_wallets() {
@@ -548,7 +550,7 @@ fn handle_import_key(
                                     state.temp_seed.clear();
                                 }
                                 Err(e) => {
-                                    state.status_message = Some(format!("Error: {}", e));
+                                    state.set_status(format!("Error: {}", e));
                                     state.input_field.clear();
                                     state.input_step = 2;
                                     state.temp_seed.clear();
@@ -650,7 +652,7 @@ fn handle_send_key(
                         resolved.unwrap_or(input)
                     };
                     if recipient.is_empty() {
-                        state.status_message = Some("No recipient selected".to_string());
+                        state.set_status("No recipient selected".to_string());
                         return;
                     }
                     state.temp_recipient = recipient;
@@ -674,7 +676,7 @@ fn handle_send_key(
                         Ok(unlocked) => {
                             let amount: f64 = amount_str.parse().unwrap_or(0.0);
                             if amount <= 0.0 {
-                                state.status_message = Some("Invalid amount".to_string());
+                                state.set_status("Invalid amount".to_string());
                                 state.input_field.clear();
                                 state.input_step = 1;
                                 state.temp_passphrase.clear();
@@ -724,7 +726,7 @@ fn handle_send_key(
                             state.temp_token.clear();
                         }
                         Err(e) => {
-                            state.status_message = Some(format!("Unlock failed: {}", e));
+                            state.set_status(format!("Unlock failed: {}", e));
                             state.input_field.clear();
                             state.input_step = 3;
                             state.temp_passphrase.clear();
@@ -804,18 +806,18 @@ fn parse_amount_input(state: &mut AppState, input: &str, token: &str) -> Option<
     if lower == "all" || lower == "max" {
         match resolve_max_amount(state, token) {
             Some(amt) => {
-                state.status_message = Some(format!("Max: {} {}", amt, token));
+                state.set_status(format!("Max: {} {}", amt, token));
                 Some(amt.to_string())
             }
             None => {
-                state.status_message = Some(format!("No balance available for {}", token));
+                state.set_status(format!("No balance available for {}", token));
                 None
             }
         }
     } else if trimmed.starts_with('$') {
         let usd: f64 = trimmed[1..].parse().unwrap_or(0.0);
         if usd <= 0.0 {
-            state.status_message = Some("Invalid USD amount".to_string());
+            state.set_status("Invalid USD amount".to_string());
             return None;
         }
         let token_upper = token.to_uppercase();
@@ -831,11 +833,11 @@ fn parse_amount_input(state: &mut AppState, input: &str, token: &str) -> Option<
         match price {
             Some(p) if p > 0.0 => {
                 let token_amount = usd / p;
-                state.status_message = Some(format!("${:.2} = {} {}", usd, token_amount, token));
+                state.set_status(format!("${:.2} = {} {}", usd, token_amount, token));
                 Some(token_amount.to_string())
             }
             _ => {
-                state.status_message = Some(format!("No price available for {} — enter amount in token units", token));
+                state.set_status(format!("No price available for {} — enter amount in token units", token));
                 None
             }
         }
@@ -904,7 +906,7 @@ fn handle_swap_key(
                         Ok(unlocked) => {
                             let amount: f64 = amount_str.parse().unwrap_or(0.0);
                             if amount <= 0.0 {
-                                state.status_message = Some("Invalid amount".to_string());
+                                state.set_status("Invalid amount".to_string());
                                 state.input_field.clear();
                                 state.input_step = 2;
                                 state.temp_passphrase.clear();
@@ -955,7 +957,7 @@ fn handle_swap_key(
                             state.temp_label.clear();
                         }
                         Err(e) => {
-                            state.status_message = Some(format!("Unlock failed: {}", e));
+                            state.set_status(format!("Unlock failed: {}", e));
                             state.input_field.clear();
                             state.input_step = 3;
                             state.temp_passphrase.clear();
@@ -980,8 +982,8 @@ fn handle_receive_key(
         KeyCode::Char('c') => {
             if let Some(addr) = state.active_pubkey() {
                 match arboard::Clipboard::new().and_then(|mut c| c.set_text(addr)) {
-                    Ok(_) => state.status_message = Some("Address copied to clipboard".to_string()),
-                    Err(_) => state.status_message = Some("Failed to copy".to_string()),
+                    Ok(_) => state.set_status("Address copied to clipboard".to_string()),
+                    Err(_) => state.set_status("Failed to copy".to_string()),
                 }
             }
         }
@@ -997,24 +999,28 @@ fn handle_contacts_key(
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 state.confirm_delete_contact = false;
+                let mut result_msg: Option<String> = None;
                 if let Some(ref mut book) = state.contacts {
                     let contacts = book.list().to_vec();
                     if state.contact_scroll < contacts.len() {
                         let label = contacts[state.contact_scroll].label.clone();
-                        match book.remove(&label) {
-                            Ok(_) => state.status_message = Some(format!("Contact '{}' removed", label)),
-                            Err(e) => state.status_message = Some(format!("Error: {}", e)),
-                        }
+                        result_msg = Some(match book.remove(&label) {
+                            Ok(_) => format!("Contact '{}' removed", label),
+                            Err(e) => format!("Error: {}", e),
+                        });
                         let count = book.list().len();
                         if state.contact_scroll >= count && count > 0 {
                             state.contact_scroll = count - 1;
                         }
                     }
                 }
+                if let Some(msg) = result_msg {
+                    state.set_status(msg);
+                }
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 state.confirm_delete_contact = false;
-                state.status_message = Some("Delete cancelled".to_string());
+                state.set_status("Delete cancelled".to_string());
             }
             _ => {}
         }
@@ -1044,14 +1050,14 @@ fn handle_contacts_key(
             state.input_field.clear();
             state.input_step = 0;
             state.temp_label.clear();
-            state.status_message = None;
+            state.clear_status();
         }
         KeyCode::Char('d') => {
             if let Some(ref book) = state.contacts {
                 let contacts = book.list().to_vec();
                 if state.contact_scroll < contacts.len() {
                     state.confirm_delete_contact = true;
-                    state.status_message = Some(format!(
+                    state.set_status(format!(
                         "Delete '{}'? Press [y] to confirm, [n] to cancel",
                         contacts[state.contact_scroll].label
                     ));
@@ -1070,7 +1076,7 @@ fn handle_contacts_key(
                     state.temp_token.clear();
                     state.temp_amount.clear();
                     state.temp_passphrase.clear();
-                    state.status_message = Some(format!("Sending to: {}", contacts[state.contact_scroll].label));
+                    state.set_status(format!("Sending to: {}", contacts[state.contact_scroll].label));
                 }
             }
         }
@@ -1081,8 +1087,8 @@ fn handle_contacts_key(
                 if state.contact_scroll < contacts.len() {
                     let addr = contacts[state.contact_scroll].address.clone();
                     match arboard::Clipboard::new().and_then(|mut c| c.set_text(addr)) {
-                        Ok(_) => state.status_message = Some("Address copied to clipboard".to_string()),
-                        Err(_) => state.status_message = Some("Failed to copy".to_string()),
+                        Ok(_) => state.set_status("Address copied to clipboard".to_string()),
+                        Err(_) => state.set_status("Failed to copy".to_string()),
                     }
                 }
             }
@@ -1098,7 +1104,7 @@ fn handle_contacts_key(
                     state.temp_token.clear();
                     state.temp_amount.clear();
                     state.temp_passphrase.clear();
-                    state.status_message = Some(format!("Sending to: {}", contacts[state.contact_scroll].label));
+                    state.set_status(format!("Sending to: {}", contacts[state.contact_scroll].label));
                 }
             }
         }
@@ -1127,11 +1133,15 @@ fn handle_contact_add_key(
                 1 => {
                     let label = state.temp_label.clone();
                     let address = state.input_field.clone();
+                    let mut result_msg: Option<String> = None;
                     if let Some(ref mut book) = state.contacts {
-                        match book.add(&label, &address, None) {
-                            Ok(_) => state.status_message = Some(format!("Contact '{}' added", label)),
-                            Err(e) => state.status_message = Some(format!("Error: {}", e)),
-                        }
+                        result_msg = Some(match book.add(&label, &address, None) {
+                            Ok(_) => format!("Contact '{}' added", label),
+                            Err(e) => format!("Error: {}", e),
+                        });
+                    }
+                    if let Some(msg) = result_msg {
+                        state.set_status(msg);
                     }
                     state.input_field.clear();
                     state.input_step = 0;
@@ -1216,6 +1226,6 @@ fn trigger_refresh(
     event_tx: &mpsc::Sender<Message>,
 ) {
     state.refresh_state = RefreshState::Loading;
-    state.status_message = None;
+    state.clear_status();
     spawn_balance_refresh(rpc, price_svc, state, event_tx.clone());
 }
