@@ -12,7 +12,11 @@ pub type ProgressFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+pub const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
+pub fn is_sol_mint(mint: &str) -> bool {
+    mint == SOL_MINT
+}
 
 /// Transfer SOL to a recipient.
 pub async fn transfer_sol(
@@ -49,6 +53,74 @@ pub async fn transfer_sol(
         &sender.pubkey(),
         &recipient_pk,
         lamports,
+    ));
+
+    send_and_confirm(rpc, sender, instructions, progress).await
+}
+
+/// Drain the full SOL balance to a recipient, disregarding the rent-exempt
+/// reserve. Computes the exact transaction fee and subtracts it so the
+/// transfer amount equals balance minus fee.
+pub async fn transfer_sol_max(
+    rpc: &super::Rpc,
+    sender: &Keypair,
+    recipient: &str,
+    progress: Option<ProgressFn>,
+) -> Result<String> {
+    let recipient_pk: Pubkey = recipient
+        .parse()
+        .map_err(|e| FatError::rpc(format!("Invalid recipient address: {}", e)))?;
+
+    let balance = rpc
+        .client
+        .get_balance(&sender.pubkey())
+        .await
+        .map_err(|e| FatError::rpc(format!("getBalance failed: {}", e)))?;
+    if balance == 0 {
+        return Err(FatError::rpc("Wallet balance is zero").into());
+    }
+
+    let priority_fee = get_priority_fee_estimate(rpc, &sender.pubkey()).await.unwrap_or(5_000);
+
+    // Build a placeholder message with the full balance to compute the exact fee.
+    // A recent blockhash is required for getFeeForMessage to accept the message.
+    let blockhash = rpc
+        .client
+        .get_latest_blockhash()
+        .await
+        .map_err(|e| FatError::rpc(format!("getLatestBlockhash failed: {}", e)))?;
+    let placeholder = vec![
+        ComputeBudgetInstruction::set_compute_unit_limit(200_000),
+        ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
+        system_transfer(&sender.pubkey(), &recipient_pk, balance),
+    ];
+    let message = solana_message::Message::new_with_blockhash(
+        &placeholder,
+        Some(&sender.pubkey()),
+        &blockhash,
+    );
+    let fee = rpc
+        .client
+        .get_fee_for_message(&message)
+        .await
+        .map_err(|e| FatError::rpc(format!("getFeeForMessage failed: {}", e)))?;
+
+    let send_lamports = balance.saturating_sub(fee);
+    if send_lamports == 0 {
+        return Err(FatError::rpc("Balance too small to cover the transaction fee").into());
+    }
+
+    if let Some(ref p) = progress {
+        p("Sending full balance...");
+    }
+
+    let mut instructions = Vec::new();
+    instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(200_000));
+    instructions.push(ComputeBudgetInstruction::set_compute_unit_price(priority_fee));
+    instructions.push(system_transfer(
+        &sender.pubkey(),
+        &recipient_pk,
+        send_lamports,
     ));
 
     send_and_confirm(rpc, sender, instructions, progress).await

@@ -6,8 +6,8 @@ use crate::rpc::transactions::TxHistoryEntry;
 pub enum Message {
     /// Keyboard / terminal event
     Key(crossterm::event::KeyEvent),
-    /// Balance refresh completed
-    BalancesLoaded(WalletBalances),
+    /// Balance refresh completed (wallet pubkey, balances)
+    BalancesLoaded(String, WalletBalances),
     /// Transaction history loaded
     TransactionsLoaded(Vec<TxHistoryEntry>),
     /// Send transaction result
@@ -18,6 +18,8 @@ pub enum Message {
     SwapResult(Result<String, String>),
     /// Swap transaction progress update
     SwapProgress(String),
+    /// Non-active wallet total loaded
+    WalletTotalLoaded(String, f64),
     /// Refresh tick (periodic)
     RefreshTick,
     /// Error during async operation

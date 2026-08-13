@@ -140,9 +140,13 @@ async fn run_event_loop(
             }
             Some(msg) = event_rx.recv() => {
                 match msg {
-                    Message::BalancesLoaded(balances) => {
-                        state.set_balances(balances);
-                        spawn_tx_refresh(&rpc, &state, event_tx.clone());
+                    Message::BalancesLoaded(pubkey, balances) => {
+                        // Ignore results for a wallet that is no longer active
+                        // (e.g. user switched wallets while the refresh was in flight).
+                        if state.active_pubkey().as_deref() == Some(pubkey.as_str()) {
+                            state.set_balances(balances);
+                            spawn_tx_refresh(&rpc, &state, event_tx.clone());
+                        }
                     }
                     Message::TransactionsLoaded(txs) => {
                         state.set_transactions(txs);
@@ -173,13 +177,16 @@ async fn run_event_loop(
                     Message::SwapProgress(stage) => {
                         state.update_tx_stage(&stage);
                     }
+                    Message::WalletTotalLoaded(pubkey, total) => {
+                        state.wallet_totals.insert(pubkey, total);
+                    }
                     Message::Error(e) => {
                         state.set_error(e);
                     }
                     _ => {}
                 }
             }
-            _ = ui_tick.tick(), if state.tx_pending_kind.is_some() || state.status_message.is_some() => {
+            _ = ui_tick.tick(), if state.tx_pending_kind.is_some() || state.status_message.is_some() || state.last_refreshed.is_some() => {
                 // Redraw to animate the pending spinner / elapsed timer,
                 // and auto-clear status messages after their TTL.
                 state.expire_status();
@@ -606,6 +613,7 @@ fn handle_send_key(
             state.temp_recipient.clear();
             state.temp_token.clear();
             state.temp_passphrase.clear();
+            state.temp_is_max = false;
             state.contact_scroll = 0;
             state.show_contact_picker = false;
         }
@@ -684,6 +692,7 @@ fn handle_send_key(
                             }
 
                             let (mint, decimals) = resolve_token_for_send(&token);
+                            let is_max = state.temp_is_max;
 
                             let event_tx2 = event_tx.clone();
                             let keypair_bytes = unlocked.keypair.to_bytes();
@@ -706,7 +715,12 @@ fn handle_send_key(
                                         return;
                                     }
                                 };
-                                match crate::rpc::transfer::transfer_with_progress(&rpc, &kp, &recipient, &mint, amount, decimals, Some(progress)).await {
+                                let result = if is_max && crate::rpc::transfer::is_sol_mint(&mint) {
+                                    crate::rpc::transfer::transfer_sol_max(&rpc, &kp, &recipient, Some(progress)).await
+                                } else {
+                                    crate::rpc::transfer::transfer_with_progress(&rpc, &kp, &recipient, &mint, amount, decimals, Some(progress)).await
+                                };
+                                match result {
                                     Ok(sig) => {
                                         let _ = event_tx2.send(Message::SendResult(Ok(sig))).await;
                                     }
@@ -724,6 +738,7 @@ fn handle_send_key(
                             state.temp_recipient.clear();
                             state.temp_amount.clear();
                             state.temp_token.clear();
+                            state.temp_is_max = false;
                         }
                         Err(e) => {
                             state.set_status(format!("Unlock failed: {}", e));
@@ -760,7 +775,7 @@ fn resolve_token_for_send(token: &str) -> (String, u8) {
 }
 
 /// Resolve "all"/"max" to the actual balance for the given token.
-/// For SOL, reserves 0.01 SOL for gas fees.
+/// For SOL, returns the full balance (draining the account, disregarding rent).
 /// For SPL tokens, uses the exact ui_amount_string from RPC for full balance.
 /// Returns None if balance is unavailable or token not found.
 fn resolve_max_amount(state: &AppState, token: &str) -> Option<String> {
@@ -779,9 +794,8 @@ fn resolve_max_amount(state: &AppState, token: &str) -> Option<String> {
 
     if resolved_mint == "So11111111111111111111111111111111111111112" {
         let bal = state.balances.as_ref()?.sol_balance;
-        let max = bal - 0.01;
-        if max > 0.0 {
-            Some(format!("{:.9}", max))
+        if bal > 0.0 {
+            Some(format!("{:.9}", bal))
         } else {
             None
         }
@@ -803,6 +817,7 @@ fn resolve_max_amount(state: &AppState, token: &str) -> Option<String> {
 fn parse_amount_input(state: &mut AppState, input: &str, token: &str) -> Option<String> {
     let trimmed = input.trim();
     let lower = trimmed.to_lowercase();
+    state.temp_is_max = lower == "all" || lower == "max";
     if lower == "all" || lower == "max" {
         match resolve_max_amount(state, token) {
             Some(amt) => {
@@ -1163,34 +1178,100 @@ fn spawn_balance_refresh(
     state: &AppState,
     tx: mpsc::Sender<Message>,
 ) {
-    if let Some(pubkey) = state.active_pubkey() {
-        let rpc = Rpc::new(&rpc.url);
-        let price_svc = PriceService::new(&price_svc.api_url, price_svc.api_key.clone());
-        tokio::spawn(async move {
-            // Small delay to allow RPC to reflect recent transactions
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            match balance::fetch_balances(&rpc, &pubkey).await {
-                Ok(mut balances) => {
-                    let mints: Vec<String> = balances.tokens.iter().map(|t| t.mint.clone()).collect();
+    let active_pubkey = state.active_pubkey();
+    let pubkeys: Vec<String> = state.wallets.iter().map(|w| w.pubkey.clone()).collect();
+    if pubkeys.is_empty() {
+        return;
+    }
+    let rpc_url = rpc.url.clone();
+    let price_api_url = price_svc.api_url.clone();
+    let price_api_key = price_svc.api_key.clone();
 
-                    // Fetch token metadata for unknown mints
-                    let cache = crate::token_metadata::fetch_and_cache_metadata(&mints).await.unwrap_or_default();
-                    for token in &mut balances.tokens {
-                        if let Some(sym) = cache.get_symbol(&token.mint) {
-                            token.symbol = sym;
+    tokio::spawn(async move {
+        // Small delay to allow RPC to reflect recent transactions
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Fetch balances for all wallets concurrently
+        let mut fetches = Vec::new();
+        for pk in pubkeys {
+            let rpc = Rpc::new(&rpc_url);
+            fetches.push(tokio::spawn(async move {
+                let res = balance::fetch_balances(&rpc, &pk).await;
+                (pk, res)
+            }));
+        }
+
+        let mut loaded: Vec<(String, balance::WalletBalances)> = Vec::new();
+        let mut active_err: Option<String> = None;
+        for f in fetches {
+            if let Ok((pk, res)) = f.await {
+                match res {
+                    Ok(b) => loaded.push((pk, b)),
+                    Err(e) => {
+                        if active_pubkey.as_deref() == Some(pk.as_str()) {
+                            active_err = Some(e.to_string());
                         }
                     }
-
-                    let prices = price_svc.get_prices(&mints).await.unwrap_or_default();
-                    balance::enrich_with_prices(&mut balances, &prices);
-                    let _ = tx.send(Message::BalancesLoaded(balances)).await;
-                }
-                Err(e) => {
-                    let _ = tx.send(Message::Error(e.to_string())).await;
                 }
             }
-        });
-    }
+        }
+
+        let active_loaded = loaded
+            .iter()
+            .any(|(pk, _)| active_pubkey.as_deref() == Some(pk.as_str()));
+        if !active_loaded {
+            let msg = active_err.unwrap_or_else(|| "Balance refresh failed".to_string());
+            let _ = tx.send(Message::Error(msg)).await;
+        }
+
+        // Union of all token mints across wallets
+        let mut all_mints: Vec<String> = Vec::new();
+        for (_, b) in &loaded {
+            for t in &b.tokens {
+                if !all_mints.contains(&t.mint) {
+                    all_mints.push(t.mint.clone());
+                }
+            }
+        }
+
+        // Fetch token metadata (symbols) for unknown mints
+        if let Ok(cache) = crate::token_metadata::fetch_and_cache_metadata(&all_mints).await {
+            for (_, b) in &mut loaded {
+                for token in &mut b.tokens {
+                    if let Some(sym) = cache.get_symbol(&token.mint) {
+                        token.symbol = sym;
+                    }
+                }
+            }
+        }
+
+        // Fetch prices once for all mints, retrying on transient failure so
+        // USD values don't drop out when a single request fails.
+        let price_svc = PriceService::new(&price_api_url, price_api_key);
+        let mut prices = std::collections::HashMap::new();
+        for attempt in 0..3 {
+            match price_svc.get_prices(&all_mints).await {
+                Ok(p) => {
+                    prices = p;
+                    break;
+                }
+                Err(_) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    }
+                }
+            }
+        }
+
+        for (pk, mut b) in loaded {
+            balance::enrich_with_prices(&mut b, &prices);
+            if active_pubkey.as_deref() == Some(pk.as_str()) {
+                let _ = tx.send(Message::BalancesLoaded(pk, b)).await;
+            } else if let Some(total) = b.total_usd_value {
+                let _ = tx.send(Message::WalletTotalLoaded(pk, total)).await;
+            }
+        }
+    });
 }
 
 fn spawn_tx_refresh(rpc: &Rpc, state: &AppState, tx: mpsc::Sender<Message>) {

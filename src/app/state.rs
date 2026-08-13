@@ -71,10 +71,13 @@ pub struct AppState {
     pub temp_amount: String,
     pub temp_recipient: String,
     pub temp_token: String,
+    pub temp_is_max: bool,
     pub contacts: Option<AddressBook>,
     pub contact_scroll: usize,
     pub show_contact_picker: bool,
     pub confirm_delete_contact: bool,
+    pub wallet_totals: HashMap<String, f64>,
+    pub last_refreshed: Option<Instant>,
 }
 
 impl AppState {
@@ -106,10 +109,13 @@ impl AppState {
             temp_amount: String::new(),
             temp_recipient: String::new(),
             temp_token: String::new(),
+            temp_is_max: false,
             contacts: None,
             contact_scroll: 0,
             show_contact_picker: false,
             confirm_delete_contact: false,
+            wallet_totals: HashMap::new(),
+            last_refreshed: None,
         }
     }
 
@@ -128,6 +134,8 @@ impl AppState {
             self.transactions.clear();
             self.tx_scroll = 0;
             self.refresh_state = RefreshState::Idle;
+            self.wallet_totals.clear();
+            self.last_refreshed = None;
         }
     }
 
@@ -138,6 +146,8 @@ impl AppState {
             self.transactions.clear();
             self.tx_scroll = 0;
             self.refresh_state = RefreshState::Idle;
+            self.wallet_totals.clear();
+            self.last_refreshed = None;
         }
     }
 
@@ -152,6 +162,8 @@ impl AppState {
             self.transactions.clear();
             self.tx_scroll = 0;
             self.refresh_state = RefreshState::Idle;
+            self.wallet_totals.clear();
+            self.last_refreshed = None;
         }
     }
 
@@ -171,6 +183,7 @@ impl AppState {
         self.balances = Some(balances);
         self.refresh_state = RefreshState::Idle;
         self.last_error = None;
+        self.last_refreshed = Some(Instant::now());
     }
 
     pub fn set_transactions(&mut self, txs: Vec<TxHistoryEntry>) {
@@ -220,5 +233,16 @@ impl AppState {
         if expired {
             self.clear_status();
         }
+    }
+
+    /// Sum of all wallet USD totals. Includes the active wallet's total
+    /// even if it hasn't been loaded into `wallet_totals` yet.
+    pub fn grand_total(&self) -> Option<f64> {
+        let active_total = self.balances.as_ref().and_then(|b| b.total_usd_value);
+        let others: f64 = self.wallet_totals.values().sum();
+        if self.wallet_totals.is_empty() && active_total.is_none() {
+            return None;
+        }
+        Some(active_total.unwrap_or(0.0) + others)
     }
 }

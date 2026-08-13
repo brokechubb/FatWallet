@@ -1,8 +1,8 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Row, Table, TableState},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
 
@@ -22,11 +22,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     // Main layout: header | content | footer
-    // Header content lines: wallet tabs + address + combined status + 2 border rows
-    let has_status = state.tx_pending_kind.is_some()
-        || state.status_message.is_some()
-        || state.refresh_state != RefreshState::Idle;
-    let header_h = if has_status { 5 } else { 4 };
+    // Header always reserves 3 content lines (wallet, address, status) so
+    // the layout never jumps when a status message appears or disappears.
+    let header_h: u16 = 5;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -156,15 +154,35 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
                 Style::default().fg(Color::Red),
             ));
         }
-        RefreshState::Idle => {}
+        RefreshState::Idle => {
+            if status_spans.is_empty() {
+                if let Some(total) = state.grand_total() {
+                    status_spans.push(Span::styled(
+                        format!("Net Worth: ${:.2}", total),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                if let Some(instant) = state.last_refreshed {
+                    let elapsed = instant.elapsed().as_secs();
+                    let ago = if elapsed < 60 {
+                        format!("Last updated {}s ago", elapsed)
+                    } else {
+                        format!("Last updated {}m{:02}s ago", elapsed / 60, elapsed % 60)
+                    };
+                    let left_len: u16 = status_spans.iter().map(|s| s.content.len() as u16).sum();
+                    let content_width = area.width.saturating_sub(2);
+                    let right_len = ago.len() as u16 + 1; // +1 for leading space
+                    let padding = content_width.saturating_sub(left_len).saturating_sub(right_len);
+                    status_spans.push(Span::from(" ".repeat(padding as usize)));
+                    status_spans.push(Span::styled(ago, Style::default().fg(Color::DarkGray)));
+                }
+            }
+        }
     }
 
     let status_line = Line::from(status_spans);
 
-    let mut content = vec![wallet_line, addr_line];
-    if !status_line.spans.is_empty() {
-        content.push(status_line);
-    }
+    let content = vec![wallet_line, addr_line, status_line];
 
     let p = Paragraph::new(content).block(header_block);
     frame.render_widget(p, area);
@@ -215,30 +233,40 @@ fn render_balances(frame: &mut Frame, state: &AppState, area: Rect) {
         .title(" Balances ")
         .style(Style::default().fg(Color::White));
 
+    /// Build a right-aligned table cell.
+    fn right_cell(s: impl Into<Text<'static>>) -> Cell<'static> {
+        Cell::new(Text::from(s.into()).alignment(Alignment::Right))
+    }
+
     if let Some(ref balances) = state.balances {
         let mut rows: Vec<Row> = Vec::new();
 
         // SOL row
         rows.push(Row::new(vec![
-            "SOL".to_string(),
-            format!("{:.6}", balances.sol_balance),
-            balances.sol_usd_price.map(|p| format!("${:.4}", p)).unwrap_or("-".to_string()),
-            balances.sol_usd_value.map(|v| format!("${:.2}", v)).unwrap_or("-".to_string()),
+            Cell::new("SOL"),
+            Cell::new(balances.sol_usd_price.map(|p| format!("${:.4}", p)).unwrap_or("-".to_string())),
+            right_cell(format!("{:.4}", balances.sol_balance)),
+            right_cell(balances.sol_usd_value.map(|v| format!("${:.2}", v)).unwrap_or("-".to_string())),
         ]));
 
         // Token rows
         for t in &balances.tokens {
             rows.push(Row::new(vec![
-                t.symbol.clone(),
-                t.ui_amount_string.clone(),
-                t.usd_price.map(|p| format!("${:.6}", p)).unwrap_or("-".to_string()),
-                t.usd_value.map(|v| format!("${:.2}", v)).unwrap_or("-".to_string()),
+                Cell::new(t.symbol.clone()),
+                Cell::new(t.usd_price.map(|p| format!("${:.4}", p)).unwrap_or("-".to_string())),
+                right_cell(format!("{:.4}", t.amount)),
+                right_cell(t.usd_value.map(|v| format!("${:.2}", v)).unwrap_or("-".to_string())),
             ]));
         }
 
         // Total row
         let total_str = balances.total_usd_value.map(|v| format!("${:.2}", v)).unwrap_or("-".to_string());
-        rows.push(Row::new(vec!["Total".to_string(), String::new(), String::new(), total_str])
+        rows.push(Row::new(vec![
+            Cell::new("Total"),
+            Cell::new(""),
+            Cell::new(""),
+            right_cell(total_str),
+        ])
             .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Green)));
 
         // Column widths scale with terminal width
@@ -247,7 +275,12 @@ fn render_balances(frame: &mut Frame, state: &AppState, area: Rect) {
 
         let table = Table::new(rows, col_widths)
             .header(
-                Row::new(vec!["Token", "Balance", "Price", "USD Value"])
+                Row::new(vec![
+                    Cell::new("Token"),
+                    Cell::new("Price"),
+                    right_cell("Balance"),
+                    right_cell("USD Value"),
+                ])
                     .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             )
             .block(block);
@@ -306,7 +339,7 @@ fn render_transactions(frame: &mut Frame, state: &AppState, area: Rect) {
                     } else if a.abs() >= 1.0 {
                         format!("{:.4}", a)
                     } else {
-                        format!("{:.6}", a)
+                        format!("{:.4}", a)
                     };
                     format!("{}{} {}", arrow, formatted, tx.token_symbol)
                 })
@@ -1020,22 +1053,22 @@ fn balance_column_widths(w: u16) -> [Constraint; 4] {
     if w >= 70 {
         [
             Constraint::Length(12),
-            Constraint::Min(15),
             Constraint::Length(14),
+            Constraint::Min(15),
             Constraint::Length(14),
         ]
     } else if w >= 55 {
         [
             Constraint::Length(10),
-            Constraint::Min(12),
             Constraint::Length(11),
+            Constraint::Min(12),
             Constraint::Length(11),
         ]
     } else {
         [
             Constraint::Length(8),
-            Constraint::Min(8),
             Constraint::Length(9),
+            Constraint::Min(8),
             Constraint::Length(9),
         ]
     }

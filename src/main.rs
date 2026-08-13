@@ -233,21 +233,21 @@ fn main() -> Result<()> {
                 rpc::balance::enrich_with_prices(&mut balances, &prices);
 
                 println!();
-                println!("{:<10} {:<18} {:<12} {:>14}", "Token", "Balance", "Price", "USD Value");
+                println!("{:<10} {:<12} {:<18} {:>14}", "Token", "Price", "Balance", "USD Value");
                 println!("{}", "-".repeat(56));
                 println!(
-                    "{:<10} {:<18} {:>12} {:>14}",
+                    "{:<10} {:>12} {:<18} {:>14}",
                     "SOL",
-                    format!("{:.6}", balances.sol_balance),
                     balances.sol_usd_price.map(|p| format!("${:.4}", p)).unwrap_or("-".to_string()),
+                    format!("{:.4}", balances.sol_balance),
                     balances.sol_usd_value.map(|v| format!("${:.2}", v)).unwrap_or("-".to_string()),
                 );
                 for t in &balances.tokens {
                     println!(
-                        "{:<10} {:<18} {:>12} {:>14}",
+                        "{:<10} {:>12} {:<18} {:>14}",
                         t.symbol,
-                        t.ui_amount_string,
-                        t.usd_price.map(|p| format!("${:.6}", p)).unwrap_or("-".to_string()),
+                        t.usd_price.map(|p| format!("${:.4}", p)).unwrap_or("-".to_string()),
+                        format!("{:.4}", t.amount),
                         t.usd_value.map(|v| format!("${:.2}", v)).unwrap_or("-".to_string()),
                     );
                 }
