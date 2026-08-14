@@ -173,15 +173,27 @@ pub async fn gasless_swap_with_progress(
     let tx: VersionedTransaction = bincode::deserialize(&tx_bytes)
         .map_err(|e| FatError::rpc(format!("Transaction deserialize failed: {}", e)))?;
 
-    // 3. Sign the transaction
+    // 3. Sign the transaction at the taker's signer index.
+    // Gasless swaps put Jupiter's gas wallet as fee payer (index 0); the taker
+    // is a later required signer, so writing at index 0 corrupts the fee-payer
+    // slot and Jupiter rejects with "Invalid signature".
     let mut signed_tx = tx;
     let message_bytes = signed_tx.message.serialize();
     let sig = keypair.try_sign_message(&message_bytes)?;
-    if signed_tx.signatures.is_empty() {
-        signed_tx.signatures.push(sig);
-    } else {
-        signed_tx.signatures[0] = sig;
+
+    let num_required_signatures = usize::from(signed_tx.message.header().num_required_signatures);
+    let signer_index = signed_tx
+        .message
+        .static_account_keys()
+        .iter()
+        .take(num_required_signatures)
+        .position(|k| *k == keypair.pubkey())
+        .ok_or_else(|| FatError::rpc("Wallet is not a required signer on the swap transaction"))?;
+
+    while signed_tx.signatures.len() < num_required_signatures {
+        signed_tx.signatures.push(Default::default());
     }
+    signed_tx.signatures[signer_index] = sig;
 
     // 4. Serialize signed tx and submit to Jupiter Ultra execute
     let signed_tx_bytes = bincode::serialize(&signed_tx)
