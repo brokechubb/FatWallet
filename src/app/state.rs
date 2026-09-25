@@ -74,6 +74,7 @@ pub struct AppState {
     pub temp_is_max: bool,
     pub contacts: Option<AddressBook>,
     pub contact_scroll: usize,
+    pub contact_view_offset: usize,
     pub show_contact_picker: bool,
     pub confirm_delete_contact: bool,
     pub wallet_totals: HashMap<String, f64>,
@@ -112,6 +113,7 @@ impl AppState {
             temp_is_max: false,
             contacts: None,
             contact_scroll: 0,
+            contact_view_offset: 0,
             show_contact_picker: false,
             confirm_delete_contact: false,
             wallet_totals: HashMap::new(),
@@ -225,6 +227,27 @@ impl AppState {
         self.status_message_at = None;
     }
 
+    /// Clamp `contact_view_offset` so the selected contact stays visible in a
+    /// window of `visible` rows out of `total`. Returns the (start, visible)
+    /// slice to render.
+    pub fn contact_window(&mut self, total: usize, visible: usize) -> (usize, usize) {
+        if total == 0 {
+            self.contact_view_offset = 0;
+            return (0, 0);
+        }
+        let visible = visible.clamp(1, total);
+        let max_start = total - visible;
+        let sel = self.contact_scroll.min(total - 1);
+        let mut start = self.contact_view_offset.min(max_start);
+        if sel < start {
+            start = sel;
+        } else if sel >= start + visible {
+            start = sel + 1 - visible;
+        }
+        self.contact_view_offset = start;
+        (start, visible)
+    }
+
     /// Clear the status message if it has been visible longer than STATUS_TTL.
     pub fn expire_status(&mut self) {
         let expired = self
@@ -244,5 +267,64 @@ impl AppState {
             return None;
         }
         Some(active_total.unwrap_or(0.0) + others)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> AppState {
+        AppState::new(Vec::new())
+    }
+
+    #[test]
+    fn window_shows_everything_when_list_fits() {
+        let mut s = state();
+        assert_eq!(s.contact_window(0, 5), (0, 0));
+        assert_eq!(s.contact_window(3, 10), (0, 3));
+        assert_eq!(s.contact_view_offset, 0);
+    }
+
+    #[test]
+    fn window_follows_selection_down() {
+        let mut s = state();
+        s.contact_scroll = 0;
+        assert_eq!(s.contact_window(10, 3), (0, 3));
+        s.contact_scroll = 2;
+        assert_eq!(s.contact_window(10, 3), (0, 3));
+        s.contact_scroll = 3;
+        assert_eq!(s.contact_window(10, 3), (1, 3));
+        s.contact_scroll = 9;
+        assert_eq!(s.contact_window(10, 3), (7, 3));
+    }
+
+    #[test]
+    fn window_follows_selection_back_up() {
+        let mut s = state();
+        s.contact_scroll = 9;
+        s.contact_window(10, 3);
+        s.contact_scroll = 5;
+        assert_eq!(s.contact_window(10, 3), (5, 3));
+        s.contact_scroll = 0;
+        assert_eq!(s.contact_window(10, 3), (0, 3));
+    }
+
+    #[test]
+    fn window_clamps_stale_offset_and_selection() {
+        let mut s = state();
+        s.contact_view_offset = 8;
+        s.contact_scroll = 42;
+        assert_eq!(s.contact_window(10, 3), (7, 3));
+        let mut s2 = state();
+        s2.contact_view_offset = 99;
+        s2.contact_scroll = 0;
+        assert_eq!(s2.contact_window(10, 3), (0, 3));
+    }
+
+    #[test]
+    fn window_never_returns_zero_rows_when_list_nonempty() {
+        let mut s = state();
+        assert_eq!(s.contact_window(5, 0), (0, 1));
     }
 }

@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::state::{AppState, ImportMode, RefreshState, TxPendingKind, UIMode};
 use crate::rpc::transactions::TxDirection;
 
-pub fn render(frame: &mut Frame, state: &AppState) {
+pub fn render(frame: &mut Frame, state: &mut AppState) {
     let area = frame.area();
 
     // On very small terminals, just show a message
@@ -36,7 +36,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     render_header(frame, state, chunks[0]);
 
-    match state.ui_mode {
+    let mode = state.ui_mode;
+    match mode {
         UIMode::TxDetail => render_tx_detail(frame, state, chunks[1]),
         UIMode::Import => render_import(frame, state, chunks[1]),
         UIMode::Receive => render_receive(frame, state, chunks[1]),
@@ -610,7 +611,7 @@ fn render_receive(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(p, area);
 }
 
-fn render_send(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_send(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Send ")
@@ -633,13 +634,13 @@ fn render_send(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Show completed steps
     if state.input_step > 0 {
-        lines.push(Line::from(vec![Span::styled("Token:   ", key_style), Span::styled(&state.temp_token, val_style)]));
+        lines.push(Line::from(vec![Span::styled("Token:   ", key_style), Span::styled(state.temp_token.clone(), val_style)]));
     }
     if state.input_step > 1 {
-        lines.push(Line::from(vec![Span::styled("Amount:  ", key_style), Span::styled(&state.temp_amount, val_style)]));
+        lines.push(Line::from(vec![Span::styled("Amount:  ", key_style), Span::styled(state.temp_amount.clone(), val_style)]));
     }
     if !state.temp_recipient.is_empty() && state.input_step > 1 {
-        lines.push(Line::from(vec![Span::styled("To:      ", key_style), Span::styled(&state.temp_recipient, val_style)]));
+        lines.push(Line::from(vec![Span::styled("To:      ", key_style), Span::styled(state.temp_recipient.clone(), val_style)]));
     }
 
     lines.push(Line::from(""));
@@ -648,14 +649,24 @@ fn render_send(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // At recipient step, show contact list if picker is active
     if state.input_step == 2 && state.show_contact_picker {
-        if let Some(ref book) = state.contacts {
-            if book.list().is_empty() {
-                lines.push(Line::from(vec![Span::styled(
-                    "No contacts in address book.",
-                    Style::default().fg(Color::DarkGray),
-                )]));
-            } else {
-                for (i, c) in book.list().iter().enumerate() {
+        let total = state.contacts.as_ref().map(|b| b.list().len()).unwrap_or(0);
+        if total == 0 {
+            lines.push(Line::from(vec![Span::styled(
+                "No contacts in address book.",
+                Style::default().fg(Color::DarkGray),
+            )]));
+        } else {
+            // Rows available: inner height minus lines already emitted and
+            // lines reserved below the list (status message + footer hint),
+            // plus one for the scroll indicator when the list overflows.
+            let inner_h = area.height.saturating_sub(2) as usize;
+            let reserved = 2 + if state.status_message.is_some() { 2 } else { 0 };
+            let avail = inner_h.saturating_sub(lines.len() + reserved);
+            let indicator = usize::from(total > avail);
+            let visible = avail.saturating_sub(indicator);
+            let (start, visible) = state.contact_window(total, visible);
+            if let Some(ref book) = state.contacts {
+                for (i, c) in book.list().iter().enumerate().skip(start).take(visible) {
                     let style = if i == state.contact_scroll {
                         Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
                     } else {
@@ -666,6 +677,12 @@ fn render_send(frame: &mut Frame, state: &AppState, area: Rect) {
                         Span::styled(format!("{} {:<15} ", prefix, c.label), style),
                         Span::styled(c.address.clone(), if i == state.contact_scroll { style } else { Style::default().fg(Color::Green) }),
                     ]));
+                }
+                if total > visible {
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("  ({}-{} of {} — Up/Dn to scroll)", start + 1, start + visible, total),
+                        Style::default().fg(Color::DarkGray),
+                    )]));
                 }
             }
         }
@@ -708,7 +725,7 @@ fn render_send(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(p, area);
 }
 
-fn render_contacts(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_contacts(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Address Book ")
@@ -716,18 +733,27 @@ fn render_contacts(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let mut lines = Vec::new();
 
-    if let Some(ref book) = state.contacts {
-        if book.list().is_empty() {
+    let total = state.contacts.as_ref().map(|b| b.list().len()).unwrap_or(0);
+    if total == 0 {
+        if state.contacts.is_some() {
             lines.push(Line::from(vec![Span::styled(
                 "No contacts yet. Press [a] to add one.",
                 Style::default().fg(Color::DarkGray),
             )]));
-        } else {
-            lines.push(Line::from(vec![Span::styled(
-                "Contacts (Up/Dn to select):",
-                Style::default().fg(Color::Cyan),
-            )]));
-            for (i, c) in book.list().iter().enumerate() {
+        }
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            "Contacts (Up/Dn to select):",
+            Style::default().fg(Color::Cyan),
+        )]));
+        let inner_h = area.height.saturating_sub(2) as usize;
+        let reserved = 2 + if state.status_message.is_some() { 2 } else { 0 };
+        let avail = inner_h.saturating_sub(lines.len() + reserved);
+        let indicator = usize::from(total > avail);
+        let visible = avail.saturating_sub(indicator);
+        let (start, visible) = state.contact_window(total, visible);
+        if let Some(ref book) = state.contacts {
+            for (i, c) in book.list().iter().enumerate().skip(start).take(visible) {
                 let style = if i == state.contact_scroll {
                     Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else {
@@ -738,6 +764,12 @@ fn render_contacts(frame: &mut Frame, state: &AppState, area: Rect) {
                     Span::styled(format!("{} {:<15} ", prefix, c.label), style),
                     Span::styled(c.address.clone(), if i == state.contact_scroll { style } else { Style::default().fg(Color::Green) }),
                 ]));
+            }
+            if total > visible {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  ({}-{} of {} — Up/Dn to scroll)", start + 1, start + visible, total),
+                    Style::default().fg(Color::DarkGray),
+                )]));
             }
         }
     }

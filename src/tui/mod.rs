@@ -125,7 +125,7 @@ async fn run_event_loop(
     ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        terminal.draw(|f| dashboard::render(f, &state))?;
+        terminal.draw(|f| dashboard::render(f, &mut state))?;
 
         tokio::select! {
             Some(key) = rx_key.recv() => {
@@ -290,7 +290,7 @@ fn handle_dashboard_key(
             state.temp_passphrase.clear();
             state.contacts = crate::addressbook::AddressBook::load().ok();
         }
-        KeyCode::Char('a') => { state.ui_mode = UIMode::Contacts; state.input_field.clear(); state.input_step = 0; state.contacts = crate::addressbook::AddressBook::load().ok(); state.clear_status(); }
+        KeyCode::Char('a') => { state.ui_mode = UIMode::Contacts; state.input_field.clear(); state.input_step = 0; state.contact_scroll = 0; state.contact_view_offset = 0; state.contacts = crate::addressbook::AddressBook::load().ok(); state.clear_status(); }
         KeyCode::Char('h') => { state.ui_mode = UIMode::Help; state.help_scroll = 0; }
         KeyCode::Char('x') => {
             state.ui_mode = UIMode::Swap;
@@ -615,6 +615,7 @@ fn handle_send_key(
             state.temp_passphrase.clear();
             state.temp_is_max = false;
             state.contact_scroll = 0;
+            state.contact_view_offset = 0;
             state.show_contact_picker = false;
         }
         KeyCode::Enter => {
@@ -632,6 +633,7 @@ fn handle_send_key(
                             state.temp_amount = amount_str;
                             state.input_field.clear();
                             state.contact_scroll = 0;
+                            state.contact_view_offset = 0;
                             if !state.temp_recipient.is_empty() {
                                 // Recipient pre-filled from address book — skip to passphrase
                                 state.input_step = 3;
@@ -1048,6 +1050,7 @@ fn handle_contacts_key(
             state.input_field.clear();
             state.input_step = 0;
             state.contact_scroll = 0;
+            state.contact_view_offset = 0;
         }
         KeyCode::Up => {
             if state.contact_scroll > 0 {
